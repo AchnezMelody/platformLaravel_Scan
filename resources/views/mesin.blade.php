@@ -61,6 +61,9 @@
   let kameraNyala = false;
   let timerUlangStream = null;
 
+  // Gambar kosong 1x1, dipakai untuk memutus koneksi stream ke Flask
+  const GAMBAR_KOSONG = 'data:image/gif;base64,R0lGODlhAQABAAAAACw=';
+
   // ==========================================
   // STREAM KAMERA PYTHON (otomatis coba lagi)
   // ==========================================
@@ -91,10 +94,15 @@
     const v = document.getElementById('videoStream');
     if (v) {
       v.onerror = null;
-      v.removeAttribute('src');
+      // Jangan pakai removeAttribute('src'): di beberapa browser koneksi MJPEG
+      // tetap menggantung. Mengganti src dengan gambar kosong memutusnya.
+      v.src = GAMBAR_KOSONG;
     }
     kameraNyala = false;
   }
+
+  // Putus stream juga saat halaman ditinggalkan / di-refresh
+  window.addEventListener('pagehide', hentikanStream);
 
   // ==========================================
   // LOGIKA TAMPILAN & KAMERA

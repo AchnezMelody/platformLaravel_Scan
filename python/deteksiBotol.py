@@ -11,7 +11,9 @@ app = Flask(__name__)
 CORS(app)
 
 # ================= KONFIGURASI =================
-INDEX_KAMERA = 1                 # 0 = webcam laptop, 1 (atau 2) = DroidCam HP
+# DroidCam USB: DroidCam Client di laptop HARUS terbuka & sudah di-Start (mode USB).
+# Index kamera DroidCam biasanya 1 (0 = webcam laptop). Cek dengan cek_kamera.py kalau ragu.
+INDEX_KAMERA = 2
 LARAVEL_URL = "http://127.0.0.1:8000/tambah"
 COOLDOWN_DETEKSI = 2.0
 MODEL_PATH = "yolov8n.pt"
@@ -19,7 +21,6 @@ MODEL_PATH = "yolov8n.pt"
 IMGSZ = 640                      # ukuran input YOLO. 640 = akurat. Kalau CPU lemah turunkan ke 480/416
 CONF = 0.35                      # ambang keyakinan. Turunkan (0.25) kalau botol sulit terdeteksi
 DEBUG_SEMUA_KELAS = False        # True = TES: deteksi semua objek (bukan hanya botol) untuk cek model hidup
-
 LEBAR, TINGGI = 480, 360         # ukuran video yang dikirim ke web (tidak mempengaruhi akurasi YOLO)
 JPEG_QUALITY = 60
 MAKS_FPS_STREAM = 20             # batas FPS yang dikirim ke browser
@@ -34,13 +35,22 @@ model = YOLO(MODEL_PATH)
 model(np.zeros((480, 640, 3), dtype=np.uint8), imgsz=IMGSZ, verbose=False)  # warm-up
 print("Model berhasil dimuat!")
 
-# ================= KAMERA =================
-camera = cv2.VideoCapture(INDEX_KAMERA, cv2.CAP_DSHOW)
-camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-if not camera.isOpened():
+# ================= KAMERA =================
+def buka_kamera():
+    cam = cv2.VideoCapture(INDEX_KAMERA, cv2.CAP_DSHOW)
+    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cam
+
+
+camera = buka_kamera()
+
+if camera.isOpened():
+    print(f"Kamera index {INDEX_KAMERA} berhasil dibuka!")
+else:
     print(f"PERINGATAN: Kamera di index {INDEX_KAMERA} tidak bisa dibuka!")
-    print("Coba ganti INDEX_KAMERA ke 0, 1 atau 2.")
+    print("Cek: DroidCam Client terbuka & sudah Start (USB), atau coba INDEX_KAMERA 0/1/2.")
+    print("Program akan terus mencoba menyambung...")
 
 # ================= STATE BERSAMA =================
 lock_mentah = threading.Lock()
@@ -78,13 +88,23 @@ def kirim_ke_laravel(ukuran):
 def baca_kamera():
     """Thread 1: baca kamera, gambar kotak terakhir, encode JPEG untuk web.
     Tidak menunggu YOLO, jadi video selalu lancar."""
-    global frame_mentah, id_mentah, jpeg_terbaru, id_jpeg
+    global frame_mentah, id_mentah, jpeg_terbaru, id_jpeg, camera
+    gagal_beruntun = 0
     while True:
         ok, frame = camera.read()
-        if not ok:
-            print("Kamera terputus, mencoba lagi...")
-            time.sleep(1)
+        if not ok or frame is None:
+            gagal_beruntun += 1
+            # Gagal beberapa kali berturut-turut: tutup & buka ulang kamera
+            if gagal_beruntun >= 3:
+                print("Kamera terputus, membuka ulang kamera...")
+                camera.release()
+                time.sleep(1)
+                camera = buka_kamera()
+                gagal_beruntun = 0
+            else:
+                time.sleep(0.3)
             continue
+        gagal_beruntun = 0
 
         with lock_mentah:
             frame_mentah = frame
