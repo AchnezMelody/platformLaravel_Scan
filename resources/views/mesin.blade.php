@@ -59,6 +59,42 @@
   let terimaKasih = false;
   let timer = null;
   let kameraNyala = false;
+  let timerUlangStream = null;
+
+  // ==========================================
+  // STREAM KAMERA PYTHON (otomatis coba lagi)
+  // ==========================================
+
+  // Alamat stream mengikuti alamat halaman ini (tidak perlu hardcode IP)
+  function urlStream() {
+    return `http://${location.hostname}:5000/video_feed?t=${Date.now()}`;
+  }
+
+  function mulaiStream() {
+    const v = document.getElementById('videoStream');
+    if (!v) return;
+
+    v.onerror = () => {
+      // Python belum siap / stream putus: coba lagi tiap 1,5 detik selama layar scan aktif
+      if (!kameraNyala) return;
+      clearTimeout(timerUlangStream);
+      timerUlangStream = setTimeout(() => {
+        if (kameraNyala) v.src = urlStream();
+      }, 1500);
+    };
+
+    v.src = urlStream();
+  }
+
+  function hentikanStream() {
+    clearTimeout(timerUlangStream);
+    const v = document.getElementById('videoStream');
+    if (v) {
+      v.onerror = null;
+      v.removeAttribute('src');
+    }
+    kameraNyala = false;
+  }
 
   // ==========================================
   // LOGIKA TAMPILAN & KAMERA
@@ -66,10 +102,10 @@
 
   function tampil(d) {
     if (d.layar === 'selesai') d.layar = 'awal';
-    
+
     document.querySelectorAll('.layar').forEach(el => el.classList.remove('aktif'));
     document.getElementById(d.layar).classList.add('aktif');
-    
+
     jBotol.textContent = d.botol;
     jPoin.textContent  = d.poin;
     btnAmbil.disabled  = d.botol < 1;
@@ -78,26 +114,22 @@
     // Ganti Tampilan KIRI (Mesin ke Kamera Python)
     const ilustrasi = document.getElementById('ilustrasiMesin');
     const layarScan = document.getElementById('layarScan');
-    const videoStream = document.getElementById('videoStream');
 
     if (d.layar === 'botol') {
         ilustrasi.style.display = 'none';
         layarScan.style.display = 'flex';
-        
-        // Nyalakan stream dari Python
+
+        // Nyalakan stream dari Python (sekali, lalu otomatis retry kalau gagal)
         if (!kameraNyala) {
-            videoStream.src = "http://10.30.102.202:5000/video_feed?t=" + new Date().getTime();
             kameraNyala = true;
+            mulaiStream();
         }
     } else {
         ilustrasi.style.display = 'block';
         layarScan.style.display = 'none';
-        
+
         // Matikan stream
-        if (kameraNyala) {
-            videoStream.src = "";
-            kameraNyala = false;
-        }
+        if (kameraNyala) hentikanStream();
     }
   }
 
@@ -124,17 +156,13 @@
     sBotol.textContent = d.botol;
     sPoin.textContent  = d.poin;
     sTotal.textContent = d.poin_akun;
-    
-    // ✅ MATIKAN KAMERA PYTHON DENGAN BENAR
-    const videoStream = document.getElementById('videoStream');
-    if (kameraNyala && videoStream) {
-        videoStream.src = "";
-        kameraNyala = false;
-    }
-    
+
+    // MATIKAN KAMERA PYTHON
+    if (kameraNyala) hentikanStream();
+
     document.querySelectorAll('.layar').forEach(el => el.classList.remove('aktif'));
     document.getElementById('selesai').classList.add('aktif');
-    
+
     document.getElementById('ilustrasiMesin').style.display = 'block';
     document.getElementById('layarScan').style.display = 'none';
 
@@ -146,7 +174,7 @@
       if (sisa <= 0) kembali();
     }, 1000);
   }
-  
+
   function kembali() {
     clearInterval(timer);
     window.location.href = '/';
