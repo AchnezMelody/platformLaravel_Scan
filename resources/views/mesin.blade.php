@@ -86,7 +86,7 @@
         
         // Nyalakan stream dari Python
         if (!kameraNyala) {
-            videoStream.src = "http://127.0.0.1:5000/video_feed?t=" + new Date().getTime();
+            videoStream.src = "http://10.30.102.202:5000/video_feed?t=" + new Date().getTime();
             kameraNyala = true;
         }
     } else {

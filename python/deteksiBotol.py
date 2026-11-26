@@ -1,160 +1,107 @@
-import time
-from pathlib import Path
-import threading
-
 import cv2
 import requests
-from ultralytics import YOLO
+import time
+import threading
 from flask import Flask, Response
 from flask_cors import CORS
+from ultralytics import YOLO
 
-# ==========================================
-# KONFIGURASI
-# ==========================================
-BASE = "http://127.0.0.1:8000"
-JEDA_KIRIM = 3     # detik minimal antar pengiriman
-CEK_STATUS = 1     # detik
-
-# Load model YOLO
-model = YOLO(str(Path(__file__).parent / "yolov8n.pt"))
-camera = cv2.VideoCapture(1)   # ganti 0 kalau kamera tidak terbuka
-if not camera.isOpened():
-    raise SystemExit("Kamera tidak bisa dibuka (coba index 0)")
-
-# ==========================================
-# SETUP FLASK UNTUK STREAMING KE WEB LARAVEL
-# ==========================================
 app = Flask(__name__)
 CORS(app)
-output_frame = None
 
-def generate_frames():
-    global output_frame
-    while True:
-        if output_frame is None:
-            time.sleep(0.1)
-            continue
-        # Encode frame ke JPEG
-        (flag, encodedImage) = cv2.imencode(".jpg", output_frame)
-        if not flag:
-            continue
-        yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + bytearray(encodedImage) + b'\r\n')
+# ================= KONFIGURASI =================
+# INDEX_KAMERA: 0 untuk webcam laptop, 1 (atau 2) untuk DroidCam HP
+INDEX_KAMERA = 1 
+LARAVEL_URL = "http://127.0.0.1:8000/tambah"
+COOLDOWN_DETEKSI = 2.0 
 
-@app.route("/video_feed")
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+# Menggunakan model bawaan YOLO (yolov8n.pt)
+MODEL_PATH = "yolov8n.pt" 
 
-# ==========================================
-# FUNGSI ASLI KAMU
-# ==========================================
-def cek_status():
-    try:
-        r = requests.get(f"{BASE}/status", timeout=2)
-        r.raise_for_status()
-        return r.json()["status"]
-    except Exception as e:
-        print("Gagal cek status:", e)
-        return "berhenti"
+print("Memuat model YOLO...")
+model = YOLO(MODEL_PATH)
+print("Model berhasil dimuat!")
 
-def kirim(jenis):
-    try:
-        r = requests.post(f"{BASE}/tambah", json={"jenis": jenis}, timeout=2)
-        r.raise_for_status()
-        print("Terkirim ke Laravel:", r.json())
-    except Exception as e:
-        print("Gagal kirim:", e)
+# Buka kamera (DroidCam / Webcam)
+camera = cv2.VideoCapture(INDEX_KAMERA, cv2.CAP_DSHOW)
 
-def ukuran(luas):
-    if luas > 300:
-        return "besar"
-    elif luas > 150:
-        return "sedang"
-    return "kecil"
+if not camera.isOpened():
+    print(f"PERINGATAN: Kamera di index {INDEX_KAMERA} tidak bisa dibuka!")
+    print("Coba ganti INDEX_KAMERA ke 0 atau 2.")
 
-# ==========================================
-# LOOP UTAMA (DETEKSI & KIRIM GAMBAR)
-# ==========================================
-def loop_kamera():
-    global output_frame
-    
-    status = "berhenti"
-    terakhir_cek = 0
-    terakhir_kirim = 0
-    ada_sebelumnya = False
-    
-    # ✅ VARIABEL UNTUK OPTIMASI YOLO
-    waktu_deteksi_terakhir = 0
-    frame_tampil_terakhir = None
+frame_terbaru = None
+lock = threading.Lock()
+terakhir_kirim = 0
 
+def proses_kamera():
+    global frame_terbaru, terakhir_kirim
     while True:
         ok, frame = camera.read()
         if not ok:
-            break
+            print("Kamera terputus, mencoba lagi...")
+            time.sleep(1)
+            continue
 
-        if time.time() - terakhir_cek > CEK_STATUS:
-            status = cek_status()
-            terakhir_cek = time.time()
+        # Deteksi YOLO (Hanya kelas 39 = Botol)
+        hasil = model(frame, conf=0.5, classes=[39], verbose=False)[0]
 
-        if status == "jalan":
-            try:
-                # ✅ OPTIMASI 1: Hanya jalankan YOLO setiap 0.3 detik (sekitar 3 FPS)
-                # Ini mengurangi beban CPU secara drastis
-                if time.time() - waktu_deteksi_terakhir > 0.3:
-                    hasil = model(frame, conf=0.5, classes=[39], verbose=False)[0]
-                    frame_tampil_terakhir = hasil.plot() # Simpan hasil gambar ber-kotak
-                    waktu_deteksi_terakhir = time.time()
-
-                    ada_sekarang = len(hasil.boxes) > 0
-                    if ada_sekarang and not ada_sebelumnya and time.time() - terakhir_kirim > JEDA_KIRIM:
-                        x1, y1, x2, y2 = hasil.boxes.xyxy[0].tolist()
-                        luas = (x2 - x1) * (y2 - y1)
-                        jenis = ukuran(luas)
-                        print(f"Botol: {jenis} (luas {luas:.0f})")
-                        kirim(jenis)
-                        terakhir_kirim = time.time()
-                    ada_sebelumnya = ada_sekarang
+        # Jika ada botol terdeteksi
+        if len(hasil.boxes) > 0:
+            # 1. Cek ukuran botol (Besar/Sedang/Kecil)
+            for box in hasil.boxes.xyxy:
+                x1, y1, x2, y2 = box
+                lebar = x2 - x1
+                tinggi = y2 - y1
+                luas = lebar * tinggi
                 
-                # Tampilkan gambar terakhir yang sudah ada kotak YOLO-nya
-                tampil = frame_tampil_terakhir if frame_tampil_terakhir is not None else frame
-            except Exception as e:
-                print("Gagal:", e)
-                tampil = frame
-        else:
-            ada_sebelumnya = False
-            frame_tampil_terakhir = None # Reset gambar saat berhenti
-            tampil = frame
+                if luas > 300:
+                    print("Botol : Besar")
+                elif luas > 150:
+                    print("Botol : Sedang")
+                else:
+                    print("Botol : Kecil")
 
-        # ✅ OPTIMASI 2: Perkecil resolusi sebelum dikirim ke web (Lebar 640px)
-        # Ini membuat pengiriman gambar di web jauh lebih ringan dan tidak ngelag
-        tampil_kecil = cv2.resize(tampil, (640, 480))
+            # 2. Kirim ke Laravel (dengan jeda cooldown)
+            if time.time() - terakhir_kirim > COOLDOWN_DETEKSI:
+                try:
+                    r = requests.post(LARAVEL_URL, timeout=2)
+                    print(f"[{time.strftime('%H:%M:%S')}] Terkirim ke Laravel: {r.status_code}")
+                    terakhir_kirim = time.time()
+                except Exception as e:
+                    print("Gagal kirim ke Laravel:", e)
 
-        # Simpan frame yang sudah dikecilkan ke variabel global
-        output_frame = tampil_kecil.copy()
+        # Simpan frame yang ada kotak deteksinya
+        annotated = hasil.plot()
+        with lock:
+            frame_terbaru = annotated
 
-        # Tampilkan jendela kamera seperti aslinya
-        cv2.imshow("YOLO Detection", tampil)
+def generate_video():
+    global frame_terbaru
+    while True:
+        with lock:
+            f = frame_terbaru
         
-        # Tekan 'k' untuk keluar
-        if cv2.waitKey(1) & 0xFF == ord("k"):
-            break
+        if f is None:
+            time.sleep(0.05)
+            continue
 
-    camera.release()
-    cv2.destroyAllWindows()
+        # Kecilkan resolusi & kompres agar ringan di web
+        small = cv2.resize(f, (480, 360))
+        _, buf = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
 
-# ==========================================
-# JALANKAN PROGRAM
-# ==========================================
-if __name__ == "__main__":
-    # 1. Jalankan kamera di background
-    t = threading.Thread(target=loop_kamera, daemon=True)
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_video(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+if __name__ == '__main__':
+    t = threading.Thread(target=proses_kamera, daemon=True)
     t.start()
-
-    # 2. Jalankan server streaming Flask
-    print("==================================================")
-    print("Server Stream berjalan di: http://127.0.0.1:5000/video_feed")
-    print("Silakan buka web Laravel di: http://127.0.0.1:8000/mesin")
-    print("Tekan 'k' di jendela kamera atau CTRL+C di terminal untuk keluar.")
-    print("==================================================")
     
-    # host 0.0.0.0 agar bisa diakses, port 5000
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    print("\n=== SERVER FLASK BERJALAN ===")
+    print("Buka http://127.0.0.1:5000/video_feed di browser laptop untuk tes")
+    print("Tekan CTRL+C untuk berhenti.\n")
+    
+    app.run(host='0.0.0.0', port=5000, threaded=True)
